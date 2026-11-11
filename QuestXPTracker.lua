@@ -265,6 +265,81 @@ local function SetQuestTooltip(owner, questID, q, anchor)
     end
 end
 
+----------------------------------------------------------------------------------------
+-- Wowhead links. Addons can't open a web browser, so this shows the URL selected in a
+-- box: Ctrl+C copies it (and closes the box), then paste it into your browser.
+----------------------------------------------------------------------------------------
+local WOWHEAD = "https://www.wowhead.com/forever/"
+
+local urlBox = CreateFrame("Frame", "QuestXPTrackerURLFrame", UIParent, "BackdropTemplate")
+urlBox:SetSize(420, 92)
+urlBox:SetPoint("CENTER", 0, 120)
+urlBox:SetFrameStrata("DIALOG")
+urlBox:SetClampedToScreen(true)
+urlBox:EnableMouse(true)
+urlBox:SetMovable(true)
+urlBox:RegisterForDrag("LeftButton")
+urlBox:SetScript("OnDragStart", urlBox.StartMoving)
+urlBox:SetScript("OnDragStop", urlBox.StopMovingOrSizing)
+urlBox:SetBackdrop({
+    bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 24,
+    insets = { left = 6, right = 6, top = 6, bottom = 6 },
+})
+urlBox:Hide()
+tinsert(UISpecialFrames, "QuestXPTrackerURLFrame")
+
+urlBox.title = urlBox:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+urlBox.title:SetPoint("TOPLEFT", 16, -14)
+urlBox.title:SetPoint("TOPRIGHT", -36, -14)
+urlBox.title:SetJustifyH("LEFT")
+urlBox.title:SetWordWrap(false)
+
+local urlClose = CreateFrame("Button", nil, urlBox, "UIPanelCloseButton")
+urlClose:SetPoint("TOPRIGHT", -4, -4)
+
+urlBox.edit = CreateFrame("EditBox", nil, urlBox, "InputBoxTemplate")
+urlBox.edit:SetPoint("TOPLEFT", 22, -38)
+urlBox.edit:SetPoint("TOPRIGHT", -18, -38)
+urlBox.edit:SetHeight(22)
+urlBox.edit:SetAutoFocus(false)
+
+urlBox.hint = urlBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+urlBox.hint:SetPoint("BOTTOM", 0, 14)
+urlBox.hint:SetText("Press Ctrl+C to copy, then paste it into your web browser.")
+
+local function SelectURL()
+    urlBox.edit:SetText(urlBox.url or "")
+    urlBox.edit:SetFocus()
+    urlBox.edit:HighlightText()
+end
+
+-- keep the text read-only: any typing puts the URL back
+urlBox.edit:SetScript("OnTextChanged", function(self, userInput)
+    if userInput and self:GetText() ~= urlBox.url then SelectURL() end
+end)
+urlBox.edit:SetScript("OnMouseUp", SelectURL)
+urlBox.edit:SetScript("OnEscapePressed", function() urlBox:Hide() end)
+urlBox.edit:SetScript("OnEnterPressed", function() urlBox:Hide() end)
+urlBox.edit:SetScript("OnKeyDown", function(_, key)
+    if key == "C" and IsControlKeyDown() then
+        C_Timer.After(0.1, function()
+            urlBox:Hide()
+            print("|cffffd200Quest XP Tracker:|r Wowhead link copied.")
+        end)
+    end
+end)
+urlBox:SetScript("OnShow", SelectURL)
+urlBox:SetScript("OnHide", function() urlBox.edit:ClearFocus() end)
+
+local function ShowWowhead(kind, id, name)
+    if not id then return end
+    urlBox.url = WOWHEAD .. kind .. "=" .. id
+    urlBox.title:SetText("Wowhead: " .. (name or (kind .. " " .. id)))
+    if urlBox:IsShown() then SelectURL() else urlBox:Show() end
+end
+
 local function SmallButton(parent, text, w)
     local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
     b:SetSize(w, 18)
@@ -618,13 +693,18 @@ local function Row_OnEnter(self)
         GameTooltip:AddDoubleLine("XP reward", Fmt(q.xp), 1, 1, 1, 1, 1, 1)
         GameTooltip:AddDoubleLine("Zone", q.zone or "?", 1, 1, 1, 1, 1, 1)
         GameTooltip:AddLine("Shift-click: link in chat. Click: open in quest log.", 0.6, 0.6, 0.6)
+        GameTooltip:AddLine("Right-click: Wowhead link.", 0.6, 0.6, 0.6)
     end
     GameTooltip:Show()
 end
 
-local function Row_OnClick(self)
+local function Row_OnClick(self, button)
     local e = self.entry
     if not e then return end
+    if button == "RightButton" then
+        if e.kind == "quest" then ShowWowhead("quest", e.id, e.q.title) end
+        return
+    end
     if e.kind == "zone" then
         DB.collapsedZones[e.zone] = (not DB.collapsedZones[e.zone]) or nil
         Refresh()
@@ -660,7 +740,7 @@ local function GetRow(i)
     row:SetHeight(ROW_H)
     row:SetPoint("TOPLEFT", 0, -(i - 1) * ROW_H)
     row:SetPoint("RIGHT", content, "RIGHT")
-    row:RegisterForClicks("LeftButtonUp")
+    row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
     row.bg = row:CreateTexture(nil, "BACKGROUND")
     row.bg:SetAllPoints()
@@ -861,12 +941,18 @@ local function ItemRow_OnEnter(self)
     else
         GameTooltip:AddLine("No quest in your log needs this item.", 1, 0.25, 0.25)
     end
-    GameTooltip:AddLine("Shift-click: link the item in chat.", 0.6, 0.6, 0.6)
+    GameTooltip:AddLine("Shift-click: link the item in chat. Right-click: Wowhead link.", 0.6, 0.6, 0.6)
     GameTooltip:Show()
 end
 
-local function ItemRow_OnClick(self)
-    if self.item and WantsLink() then InsertChatLink(self.item.link) end
+local function ItemRow_OnClick(self, button)
+    local it = self.item
+    if not it then return end
+    if button == "RightButton" then
+        ShowWowhead("item", it.itemID, it.name)
+    elseif WantsLink() then
+        InsertChatLink(it.link)
+    end
 end
 
 local function ItemQuest_OnEnter(self)
@@ -880,13 +966,17 @@ local function ItemQuest_OnEnter(self)
         for i = 2, #it.uses do GameTooltip:AddLine(it.uses[i].title, 0.2, 1, 0.3) end
     end
     GameTooltip:AddLine("Shift-click: link the quest. Click: open it in the quest log.", 0.6, 0.6, 0.6)
+    GameTooltip:AddLine("Right-click: Wowhead link.", 0.6, 0.6, 0.6)
     GameTooltip:Show()
 end
 
-local function ItemQuest_OnClick(self)
+local function ItemQuest_OnClick(self, button)
     local id = self.questID
     if not id then return end
-    if WantsLink() then
+    if button == "RightButton" then
+        local q = DB.quests[id]
+        ShowWowhead("quest", id, (q and q.title) or QuestTitleByID(id))
+    elseif WantsLink() then
         InsertChatLink(QuestLink(id, DB.quests[id]))
     elseif DB.quests[id] then
         OpenQuest(id, DB.quests[id])
@@ -899,7 +989,7 @@ local function GetItemRow(i)
     row:SetHeight(ITEM_ROW_H)
     row:SetPoint("TOPLEFT", 0, -(i - 1) * ITEM_ROW_H)
     row:SetPoint("RIGHT", itemsContent, "RIGHT")
-    row:RegisterForClicks("LeftButtonUp")
+    row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
     row.bg = row:CreateTexture(nil, "BACKGROUND")
     row.bg:SetAllPoints()
@@ -930,7 +1020,7 @@ local function GetItemRow(i)
     row.quest:SetPoint("BOTTOMLEFT", row.icon, "BOTTOMRIGHT", 8, 0)
     row.quest:SetPoint("BOTTOMRIGHT", -4, 3)
     row.quest:SetHeight(14)
-    row.quest:RegisterForClicks("LeftButtonUp")
+    row.quest:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     row.quest.text = row.quest:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.quest.text:SetAllPoints()
     row.quest.text:SetJustifyH("LEFT")

@@ -18,6 +18,7 @@ A World of Warcraft addon for **WoW Forever** (interface 16001) that keeps track
   - The quest that uses it (matched on quest objectives and the quest's usable item). Click it to open the quest, shift-click to link it. "(+1)" means more quests use it; hover to see them.
   - Items that start a quest show "Starts: quest name".
   - Items no quest in your log needs any more get a **big red cross**, a red row and "No longer needed", and are listed first.
+- **Wowhead links**: right-click a quest (in either window) or an item to get its `wowhead.com/forever/...` link in a box, selected and ready for Ctrl+C. Addons can't open a web browser, so paste it there yourself.
 - **Resizable**: drag the grip in the bottom-right corner of either window. Sizes are saved.
 - **Minimap button** with a "Qxp" icon: left-click shows/hides the window, right-click folds the list, drag to move it around the minimap. The tooltip shows the summary.
 - **Titan Panel plugin** "Qxp" (through LibDataBroker): shows active quest XP / XP needed, with the same tooltip and clicks. Any other LDB display works too.
