@@ -1,6 +1,10 @@
+<p align="center"><img src="Media/logo.png" alt="Qxp logo" width="160"></p>
+
 # Quest XP Tracker (WoW Forever)
 
-A World of Warcraft addon for **WoW Forever** (interface 16001) that keeps track of the experience reward of every quest in your quest log.
+> Track the XP of every quest in your log, see how close it gets you to your next level, and spot the quest items you no longer need.
+
+A World of Warcraft addon for **WoW Forever** (interface 16001).
 
 ## Features
 
@@ -27,6 +31,15 @@ A World of Warcraft addon for **WoW Forever** (interface 16001) that keeps track
 ## Install
 
 Copy the folder into `World of Warcraft\_forever_\Interface\AddOns\` and name it `QuestXPTracker` (the folder name must match the `.toc` file).
+
+## Logo and icon
+
+`Media/logo.png` (512 px) and the in-game icon `Media/QxpIcon.tga` (64 px) are drawn by `tools/make-logo.ps1`:
+
+```powershell
+.\tools\make-logo.ps1 -Size 512 -Png Media\logo.png
+.\tools\make-logo.ps1 -Size 64 -Tga Media\QxpIcon.tga
+```
 
 ## Commands
 
