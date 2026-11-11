@@ -1,29 +1,35 @@
 -- Quest XP Tracker
--- Lists every quest in the quest log with its zone and XP reward, and shows how far
--- the XP from all *active* quests takes you toward the next level.
--- Works on Retail and Classic clients: it uses C_QuestLog when present and falls back
+-- Lists every quest in the quest log, grouped by zone, with its XP reward, and shows how
+-- far the XP from all *active* quests takes you toward the next level.
+-- Also provides a minimap button and a LibDataBroker feed (shown by Titan Panel).
+-- Works on Retail-style clients (WoW Forever, Midnight) through C_QuestLog and falls back
 -- to the older GetQuestLogTitle / SelectQuestLogEntry API otherwise.
 
 local ADDON_NAME = ...
+local ICON = "Interface\\AddOns\\" .. ADDON_NAME .. "\\Media\\QxpIcon"
 
 ----------------------------------------------------------------------------------------
 -- Saved data (per character)
 ----------------------------------------------------------------------------------------
 -- QuestXPTrackerDB = {
---   quests   = { [questID] = { title, level, zone, xp } },  -- cache, so quests under
---                                                           -- collapsed headers stay listed
---   excluded = { [questID] = true },                        -- "Inactive": not counted
+--   quests        = { [questID] = { title, level, zone, xp } },  -- cache, so quests under
+--                                                                -- collapsed log headers stay listed
+--   excluded      = { [questID] = true },                        -- "Inactive": not counted
+--   collapsedZones = { [zone] = true },                          -- zone groups folded in our list
+--   minimap       = { angle = degrees, hide = bool },
 --   listOpen, sortKey, sortAsc, point = { point, relPoint, x, y }, shown
 -- }
 local DB
 
 local DEFAULTS = {
-    quests   = {},
-    excluded = {},
-    listOpen = true,
-    sortKey  = "xp",
-    sortAsc  = false,
-    shown    = true,
+    quests         = {},
+    excluded       = {},
+    collapsedZones = {},
+    minimap        = {},
+    listOpen       = true,
+    sortKey        = "xp",
+    sortAsc        = false,
+    shown          = true,
 }
 
 ----------------------------------------------------------------------------------------
@@ -132,19 +138,57 @@ local function DifficultyColor(level)
 end
 
 ----------------------------------------------------------------------------------------
--- UI
+-- Totals (shared by the window, the minimap tooltip and the Titan / LDB feed)
+----------------------------------------------------------------------------------------
+local function GetSummary()
+    local s = { total = 0, count = 0, active = 0 }
+    for id, q in pairs(DB.quests) do
+        s.count = s.count + 1
+        if IsActive(id) then
+            s.active = s.active + 1
+            s.total = s.total + (q.xp or 0)
+        end
+    end
+    s.level = Plain(UnitLevel("player")) or 0
+    s.cur = Plain(UnitXP("player")) or 0
+    s.max = Plain(UnitXPMax("player")) or 0
+    local maxLevel = GetMaxPlayerLevel and GetMaxPlayerLevel()
+    s.atMax = (s.max == 0) or (maxLevel and s.level >= maxLevel) or false
+    s.needed = math.max(s.max - s.cur, 0)
+    return s
+end
+
+local function AddSummaryLines(tt, s)
+    if s.atMax then
+        tt:AddDoubleLine("Level", s.level .. " (max)", 1, 1, 1, 1, 1, 1)
+    else
+        tt:AddDoubleLine("Level " .. s.level, Fmt(s.cur) .. " / " .. Fmt(s.max), 1, 1, 1, 1, 1, 1)
+        tt:AddDoubleLine("Needed to level", Fmt(s.needed), 1, 1, 1, 1, 1, 1)
+    end
+    tt:AddDoubleLine(string.format("Active quests (%d/%d)", s.active, s.count), Fmt(s.total) .. " XP", 1, 1, 1, 0.2, 1, 0.3)
+    if not s.atMax then
+        if s.total >= s.needed then
+            tt:AddLine(string.format("Enough to level! %s XP over.", Fmt(s.total - s.needed)), 0.2, 1, 0.3)
+        else
+            tt:AddLine(string.format("Short by %s XP after turning in.", Fmt(s.needed - s.total)), 1, 0.5, 0.25)
+        end
+    end
+end
+
+----------------------------------------------------------------------------------------
+-- Main window
 ----------------------------------------------------------------------------------------
 local FRAME_W   = 480
 local ROW_H     = 18
 local LIST_ROWS = 14
 local LIST_H    = ROW_H * LIST_ROWS
 local CONTENT_W = FRAME_W - 16 - 30   -- room for the scroll bar
+local INDENT    = 18
 
 -- column x-offsets / widths inside a row
 local COL = {
-    title = { x = 4,   w = 190 },
-    zone  = { x = 198, w = 118 },
-    xp    = { x = 318, w = 54 },
+    title = { x = 4,   w = 300 },
+    xp    = { x = 308, w = 64 },
     btn   = { x = 378, w = 56 },
 }
 
@@ -179,8 +223,13 @@ frame:SetScript("OnShow", function() if DB then DB.shown = true end; if Refresh 
 frame:Hide()
 tinsert(UISpecialFrames, "QuestXPTrackerFrame") -- Escape closes it
 
+local titleIcon = frame:CreateTexture(nil, "OVERLAY")
+titleIcon:SetSize(20, 20)
+titleIcon:SetPoint("TOPLEFT", 10, -6)
+titleIcon:SetTexture(ICON)
+
 local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-title:SetPoint("TOPLEFT", 12, -10)
+title:SetPoint("LEFT", titleIcon, "RIGHT", 6, 0)
 title:SetText("Quest XP Tracker")
 
 local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
@@ -283,7 +332,6 @@ local function HeaderButton(key, label, col, justify)
     fs:SetJustifyH(justify or "LEFT")
     b.label, b.fs, b.key = label, fs, key
     b:SetScript("OnClick", function(self)
-        if not self.key then return end
         if DB.sortKey == self.key then
             DB.sortAsc = not DB.sortAsc
         else
@@ -295,10 +343,9 @@ local function HeaderButton(key, label, col, justify)
     headerButtons[#headerButtons + 1] = b
     return b
 end
-HeaderButton("title", "Quest", COL.title)
-HeaderButton("zone",  "Zone",  COL.zone)
-HeaderButton("xp",    "XP",    COL.xp, "RIGHT")
-HeaderButton("active", "Counted", COL.btn, "CENTER")
+HeaderButton("title",  "Zone / Quest", COL.title)
+HeaderButton("xp",     "XP",           COL.xp, "RIGHT")
+HeaderButton("active", "Counted",      COL.btn, "CENTER")
 
 -- Scrolling list
 scroll = CreateFrame("ScrollFrame", "QuestXPTrackerScroll", frame, "UIPanelScrollFrameTemplate")
@@ -312,30 +359,66 @@ emptyText = content:CreateFontString(nil, "OVERLAY", "GameFontDisable")
 emptyText:SetPoint("TOP", 0, -20)
 emptyText:SetText("Your quest log is empty.")
 
+----------------------------------------------------------------------------------------
+-- List rows: one frame type used for both zone headers and quests
+----------------------------------------------------------------------------------------
 local function Row_OnEnter(self)
-    if not self.questID then return end
+    local e = self.entry
+    if not e then return end
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    local ok = pcall(GameTooltip.SetHyperlink, GameTooltip, "quest:" .. self.questID .. ":" .. (self.quest.level or 0))
-    if not ok then
-        GameTooltip:ClearLines()
-        GameTooltip:AddLine(self.quest.title)
+    if e.kind == "zone" then
+        GameTooltip:AddLine(e.zone)
+        GameTooltip:AddDoubleLine("Quests", e.count, 1, 1, 1, 1, 1, 1)
+        GameTooltip:AddDoubleLine("Active", e.active, 1, 1, 1, 1, 1, 1)
+        GameTooltip:AddDoubleLine("Active XP", Fmt(e.xp), 1, 1, 1, 0.2, 1, 0.3)
+        GameTooltip:AddLine("Click to fold or unfold.", 0.6, 0.6, 0.6)
+    else
+        local q = e.q
+        local ok = pcall(GameTooltip.SetHyperlink, GameTooltip, "quest:" .. e.id .. ":" .. (q.level or 0))
+        if not ok then
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(q.title)
+        end
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddDoubleLine("XP reward", Fmt(q.xp), 1, 1, 1, 1, 1, 1)
+        GameTooltip:AddDoubleLine("Zone", q.zone or "?", 1, 1, 1, 1, 1, 1)
+        GameTooltip:AddLine("Shift-click: link in chat. Click: open in quest log.", 0.6, 0.6, 0.6)
     end
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddDoubleLine("XP reward", Fmt(self.quest.xp), 1, 1, 1, 1, 1, 1)
-    GameTooltip:AddDoubleLine("Zone", self.quest.zone or "?", 1, 1, 1, 1, 1, 1)
-    GameTooltip:AddLine("Shift-click: link in chat. Click: open in quest log.", 0.6, 0.6, 0.6)
     GameTooltip:Show()
 end
 
 local function Row_OnClick(self)
-    if not self.questID then return end
-    if IsModifiedClick and IsModifiedClick("CHATLINK") or IsShiftKeyDown() then
-        local link = QuestLink(self.questID, self.quest)
+    local e = self.entry
+    if not e then return end
+    if e.kind == "zone" then
+        DB.collapsedZones[e.zone] = (not DB.collapsedZones[e.zone]) or nil
+        Refresh()
+        return
+    end
+    if (IsModifiedClick and IsModifiedClick("CHATLINK")) or IsShiftKeyDown() then
+        local link = QuestLink(e.id, e.q)
         if ChatEdit_InsertLink and ChatEdit_InsertLink(link) then return end
         if ChatFrame_OpenChat then ChatFrame_OpenChat(link) end
     else
-        OpenQuest(self.questID, self.quest)
+        OpenQuest(e.id, e.q)
     end
+end
+
+local function Toggle_OnClick(btn)
+    local e = btn:GetParent().entry
+    if not e then return end
+    if e.kind == "zone" then
+        -- all active -> make the whole zone inactive; otherwise make it all active
+        local makeInactive = (e.active == e.count)
+        for id, q in pairs(DB.quests) do
+            if q.zone == e.zone then
+                DB.excluded[id] = makeInactive or nil
+            end
+        end
+    else
+        DB.excluded[e.id] = (not DB.excluded[e.id]) or nil
+    end
+    Refresh()
 end
 
 local function GetRow(i)
@@ -345,24 +428,19 @@ local function GetRow(i)
     row:SetPoint("TOPLEFT", 0, -(i - 1) * ROW_H)
     row:RegisterForClicks("LeftButtonUp")
 
-    local stripe = row:CreateTexture(nil, "BACKGROUND")
-    stripe:SetAllPoints()
-    stripe:SetColorTexture(1, 1, 1, (i % 2 == 0) and 0.04 or 0)
+    row.bg = row:CreateTexture(nil, "BACKGROUND")
+    row.bg:SetAllPoints()
     local hl = row:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints()
     hl:SetColorTexture(1, 0.82, 0, 0.12)
 
+    row.fold = row:CreateTexture(nil, "ARTWORK")
+    row.fold:SetSize(12, 12)
+    row.fold:SetPoint("LEFT", COL.title.x, 0)
+
     row.title = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    row.title:SetPoint("LEFT", COL.title.x, 0)
-    row.title:SetWidth(COL.title.w)
     row.title:SetJustifyH("LEFT")
     row.title:SetWordWrap(false)
-
-    row.zone = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    row.zone:SetPoint("LEFT", COL.zone.x, 0)
-    row.zone:SetWidth(COL.zone.w)
-    row.zone:SetJustifyH("LEFT")
-    row.zone:SetWordWrap(false)
 
     row.xp = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.xp:SetPoint("LEFT", COL.xp.x, 0)
@@ -372,12 +450,7 @@ local function GetRow(i)
     row.toggle = SmallButton(row, "Active", COL.btn.w)
     row.toggle:SetHeight(ROW_H - 2)
     row.toggle:SetPoint("LEFT", COL.btn.x, 0)
-    row.toggle:SetScript("OnClick", function(btn)
-        local id = btn:GetParent().questID
-        if not id then return end
-        if DB.excluded[id] then DB.excluded[id] = nil else DB.excluded[id] = true end
-        Refresh()
-    end)
+    row.toggle:SetScript("OnClick", Toggle_OnClick)
 
     row:SetScript("OnEnter", Row_OnEnter)
     row:SetScript("OnLeave", GameTooltip_Hide)
@@ -386,78 +459,257 @@ local function GetRow(i)
     return row
 end
 
-----------------------------------------------------------------------------------------
--- Refresh
-----------------------------------------------------------------------------------------
-local function SortedQuests()
-    local list = {}
-    for id, q in pairs(DB.quests) do
-        list[#list + 1] = { id = id, q = q, active = IsActive(id) }
+local function SetRowTitle(row, x)
+    row.title:ClearAllPoints()
+    row.title:SetPoint("LEFT", x, 0)
+    row.title:SetWidth(COL.title.w - (x - COL.title.x))
+end
+
+local function FillZoneRow(row, e)
+    row.bg:SetColorTexture(0.35, 0.2, 0.55, 0.35)
+    row.fold:Show()
+    row.fold:SetTexture(DB.collapsedZones[e.zone] and "Interface\\Buttons\\UI-PlusButton-Up" or "Interface\\Buttons\\UI-MinusButton-Up")
+    SetRowTitle(row, COL.title.x + 16)
+    row.title:SetFontObject("GameFontNormal")
+    row.title:SetText(string.format("%s  |cffaaaaaa(%d/%d)|r", e.zone, e.active, e.count))
+    row.title:SetTextColor(1, 0.82, 0)
+    row.xp:SetText("|cff20ff20" .. Fmt(e.xp) .. "|r")
+    row.title:SetAlpha(1); row.xp:SetAlpha(1)
+    if e.active == e.count then
+        row.toggle:SetText("Active")
+    elseif e.active == 0 then
+        row.toggle:SetText("Inactive")
+    else
+        row.toggle:SetText("Mixed")
     end
-    local key, asc = DB.sortKey, DB.sortAsc
-    table.sort(list, function(a, b)
-        local va, vb
-        if key == "xp" then
-            va, vb = a.q.xp or 0, b.q.xp or 0
-        elseif key == "zone" then
-            va, vb = a.q.zone or "", b.q.zone or ""
-        elseif key == "active" then
-            va, vb = a.active and 1 or 0, b.active and 1 or 0
-        else
-            va, vb = a.q.title or "", b.q.title or ""
+end
+
+local function FillQuestRow(row, e, stripe)
+    row.bg:SetColorTexture(1, 1, 1, stripe and 0.04 or 0)
+    row.fold:Hide()
+    SetRowTitle(row, COL.title.x + INDENT)
+    local r, g, b = DifficultyColor(e.q.level)
+    local lvl = (e.q.level and e.q.level > 0) and ("[" .. e.q.level .. "] ") or ""
+    row.title:SetFontObject("GameFontNormalSmall")
+    row.title:SetText(lvl .. (e.q.title or "?"))
+    row.title:SetTextColor(r, g, b)
+    row.xp:SetText(Fmt(e.q.xp))
+    local alpha = e.active and 1 or 0.4
+    row.title:SetAlpha(alpha); row.xp:SetAlpha(alpha)
+    row.toggle:SetText(e.active and "Active" or "Inactive")
+end
+
+----------------------------------------------------------------------------------------
+-- Building the grouped list
+----------------------------------------------------------------------------------------
+local function Compare(va, vb, asc, tieA, tieB)
+    if va == vb then return tieA < tieB end
+    if asc then return va < vb else return va > vb end
+end
+
+local function BuildEntries()
+    local zones, byZone = {}, {}
+    for id, q in pairs(DB.quests) do
+        local zname = q.zone or (UNKNOWN or "Unknown")
+        local z = byZone[zname]
+        if not z then
+            z = { kind = "zone", zone = zname, count = 0, active = 0, xp = 0, quests = {} }
+            byZone[zname] = z
+            zones[#zones + 1] = z
         end
-        if va == vb then return (a.q.title or "") < (b.q.title or "") end
-        if asc then return va < vb else return va > vb end
+        local active = IsActive(id)
+        z.count = z.count + 1
+        if active then
+            z.active = z.active + 1
+            z.xp = z.xp + (q.xp or 0)
+        end
+        z.quests[#z.quests + 1] = { kind = "quest", id = id, q = q, active = active }
+    end
+
+    local key, asc = DB.sortKey, DB.sortAsc
+    table.sort(zones, function(a, b)
+        if key == "xp" then return Compare(a.xp, b.xp, asc, a.zone, b.zone) end
+        if key == "active" then return Compare(a.active, b.active, asc, a.zone, b.zone) end
+        return Compare(a.zone, b.zone, asc, a.zone, b.zone)
     end)
+
+    local list = {}
+    for _, z in ipairs(zones) do
+        table.sort(z.quests, function(a, b)
+            local ta, tb = a.q.title or "", b.q.title or ""
+            if key == "xp" then return Compare(a.q.xp or 0, b.q.xp or 0, asc, ta, tb) end
+            if key == "active" then return Compare(a.active and 1 or 0, b.active and 1 or 0, asc, ta, tb) end
+            return Compare(ta, tb, asc, ta, tb)
+        end)
+        list[#list + 1] = z
+        if not DB.collapsedZones[z.zone] then
+            for _, e in ipairs(z.quests) do list[#list + 1] = e end
+        end
+    end
     return list
 end
 
-Refresh = function()
-    if not DB or not frame:IsShown() then return end
+----------------------------------------------------------------------------------------
+-- Minimap button
+----------------------------------------------------------------------------------------
+local minimapBtn = CreateFrame("Button", "QuestXPTrackerMinimapButton", Minimap)
+minimapBtn:SetSize(31, 31)
+minimapBtn:SetFrameStrata("MEDIUM")
+minimapBtn:SetFrameLevel(8)
+minimapBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+minimapBtn:RegisterForDrag("LeftButton")
+minimapBtn:SetHighlightTexture(136477) -- Interface\Minimap\UI-Minimap-ZoomButton-Highlight
 
-    -- totals
-    local list = SortedQuests()
-    local total, activeCount = 0, 0
-    for _, e in ipairs(list) do
-        if e.active then
-            total = total + (e.q.xp or 0)
-            activeCount = activeCount + 1
-        end
+local modernMinimap = AddonCompartmentFrame ~= nil
+local mmBg = minimapBtn:CreateTexture(nil, "BACKGROUND")
+mmBg:SetTexture(136467) -- Interface\Minimap\UI-Minimap-Background
+local mmIcon = minimapBtn:CreateTexture(nil, "ARTWORK")
+mmIcon:SetTexture(ICON)
+local mmBorder = minimapBtn:CreateTexture(nil, "OVERLAY")
+mmBorder:SetTexture(136430) -- Interface\Minimap\MiniMap-TrackingBorder
+mmBorder:SetPoint("TOPLEFT")
+if modernMinimap then
+    mmBg:SetSize(24, 24);   mmBg:SetPoint("CENTER")
+    mmIcon:SetSize(20, 20); mmIcon:SetPoint("CENTER")
+    mmBorder:SetSize(50, 50)
+else
+    mmBg:SetSize(20, 20);   mmBg:SetPoint("TOPLEFT", 7, -5)
+    mmIcon:SetSize(19, 19); mmIcon:SetPoint("TOPLEFT", 6, -6)
+    mmBorder:SetSize(53, 53)
+end
+
+local function PlaceMinimapButton()
+    local angle = math.rad(DB and DB.minimap.angle or 200)
+    local x, y = math.cos(angle), math.sin(angle)
+    local w = (Minimap:GetWidth() / 2) + 5
+    local h = (Minimap:GetHeight() / 2) + 5
+    local shape = GetMinimapShape and GetMinimapShape() or "ROUND"
+    minimapBtn:ClearAllPoints()
+    if shape == "SQUARE" then
+        x = math.max(-w, math.min(x * w * 1.42, w))
+        y = math.max(-h, math.min(y * h * 1.42, h))
+        minimapBtn:SetPoint("CENTER", Minimap, "CENTER", x, y)
+    else
+        minimapBtn:SetPoint("CENTER", Minimap, "CENTER", x * w, y * h)
     end
+end
+
+local function MinimapDragUpdate()
+    local mx, my = Minimap:GetCenter()
+    local px, py = GetCursorPosition()
+    local scale = Minimap:GetEffectiveScale()
+    px, py = px / scale, py / scale
+    DB.minimap.angle = math.deg(math.atan2(py - my, px - mx)) % 360
+    PlaceMinimapButton()
+end
+
+minimapBtn:SetScript("OnDragStart", function(self)
+    self:SetScript("OnUpdate", MinimapDragUpdate)
+    GameTooltip:Hide()
+end)
+minimapBtn:SetScript("OnDragStop", function(self)
+    self:SetScript("OnUpdate", nil)
+end)
+
+local function ToggleWindow()
+    frame:SetShown(not frame:IsShown())
+end
+
+local function ShowBrokerTooltip(tt)
+    tt:AddLine("Quest XP Tracker")
+    AddSummaryLines(tt, GetSummary())
+    tt:AddLine(" ")
+    tt:AddLine("Left-click: show / hide the window", 0.6, 0.6, 0.6)
+    tt:AddLine("Right-click: fold / unfold the quest list", 0.6, 0.6, 0.6)
+end
+
+local function BrokerClick(button)
+    if button == "RightButton" then
+        DB.listOpen = not DB.listOpen
+        if not frame:IsShown() then frame:Show() end
+        Refresh()
+    else
+        ToggleWindow()
+    end
+end
+
+minimapBtn:SetScript("OnClick", function(_, button) BrokerClick(button) end)
+minimapBtn:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+    ShowBrokerTooltip(GameTooltip)
+    GameTooltip:AddLine("Drag: move around the minimap", 0.6, 0.6, 0.6)
+    GameTooltip:Show()
+end)
+minimapBtn:SetScript("OnLeave", GameTooltip_Hide)
+
+-- Addon compartment (the addon list button by the minimap on modern clients)
+function QuestXPTracker_OnAddonCompartmentClick(_, button)
+    BrokerClick(button)
+end
+
+----------------------------------------------------------------------------------------
+-- LibDataBroker feed: Titan Panel (and other broker displays) pick this up
+----------------------------------------------------------------------------------------
+local broker
+local LDB = LibStub and LibStub("LibDataBroker-1.1", true)
+if LDB then
+    broker = LDB:NewDataObject(ADDON_NAME, {
+        type  = "data source",
+        label = "Qxp",
+        text  = "0 XP",
+        icon  = ICON,
+        OnClick = function(_, button) BrokerClick(button) end,
+        OnTooltipShow = function(tt) ShowBrokerTooltip(tt) end,
+    })
+end
+
+local function UpdateBroker(s)
+    if not broker then return end
+    if s.atMax then
+        broker.text = Fmt(s.total) .. " XP"
+    elseif s.total >= s.needed and s.needed > 0 then
+        broker.text = "|cff20ff20" .. Fmt(s.total) .. "|r / " .. Fmt(s.needed) .. " XP"
+    else
+        broker.text = Fmt(s.total) .. " / " .. Fmt(s.needed) .. " XP"
+    end
+end
+
+----------------------------------------------------------------------------------------
+-- Refresh
+----------------------------------------------------------------------------------------
+Refresh = function()
+    if not DB then return end
+    local s = GetSummary()
+    UpdateBroker(s)
+    if not frame:IsShown() then return end
 
     -- XP bar
-    local level = Plain(UnitLevel("player")) or 0
-    local cur, max = Plain(UnitXP("player")) or 0, Plain(UnitXPMax("player")) or 0
-    local maxLevel = GetMaxPlayerLevel and GetMaxPlayerLevel()
-    local atMax = (max == 0) or (maxLevel and level >= maxLevel)
-
-    if atMax then
+    if s.atMax then
         bar:SetMinMaxValues(0, 1); bar:SetValue(1)
         projBar:SetMinMaxValues(0, 1); projBar:SetValue(1)
-        barText:SetText("Level " .. level .. " (max level)")
+        barText:SetText("Level " .. s.level .. " (max level)")
         lineNeeded:SetText("")
-        lineQuests:SetText("Active quests: " .. Fmt(total) .. " XP")
+        lineQuests:SetText("Active quests: " .. Fmt(s.total) .. " XP")
         lineResult:SetText("")
     else
-        local needed = max - cur
-        bar:SetMinMaxValues(0, max); bar:SetValue(cur)
-        projBar:SetMinMaxValues(0, max); projBar:SetValue(math.min(cur + total, max))
-        barText:SetText(string.format("Level %d:  %s / %s XP  (%d%%)", level, Fmt(cur), Fmt(max), math.floor(cur / max * 100)))
+        bar:SetMinMaxValues(0, s.max); bar:SetValue(s.cur)
+        projBar:SetMinMaxValues(0, s.max); projBar:SetValue(math.min(s.cur + s.total, s.max))
+        barText:SetText(string.format("Level %d:  %s / %s XP  (%d%%)", s.level, Fmt(s.cur), Fmt(s.max), math.floor(s.cur / s.max * 100)))
         lineNeeded:SetText(string.format("XP needed for level %d:  |cffffffff%s|r  (level %d needs %s XP in total)",
-            level + 1, Fmt(needed), level, Fmt(max)))
+            s.level + 1, Fmt(s.needed), s.level, Fmt(s.max)))
         lineQuests:SetText(string.format("XP from active quests:  |cff20ff20%s|r  (%d%% of this level)",
-            Fmt(total), math.floor(total / max * 100)))
-        if total >= needed then
+            Fmt(s.total), math.floor(s.total / s.max * 100)))
+        if s.total >= s.needed then
             lineResult:SetText(string.format("|cff20ff20Enough to level up!|r  %s XP over into level %d",
-                Fmt(total - needed), level + 1))
+                Fmt(s.total - s.needed), s.level + 1))
         else
-            lineResult:SetText(string.format("|cffff8040Still short after turning them all in:|r  %s XP", Fmt(needed - total)))
+            lineResult:SetText(string.format("|cffff8040Still short after turning them all in:|r  %s XP", Fmt(s.needed - s.total)))
         end
     end
 
     -- dropdown header
     dropIcon:SetTexture(DB.listOpen and "Interface\\Buttons\\UI-MinusButton-Up" or "Interface\\Buttons\\UI-PlusButton-Up")
-    dropText:SetText(string.format("Quests in log: %d  (%d active)", #list, activeCount))
+    dropText:SetText(string.format("Quests in log: %d  (%d active)", s.count, s.active))
 
     colHeader:SetShown(DB.listOpen)
     scroll:SetShown(DB.listOpen)
@@ -479,23 +731,23 @@ Refresh = function()
     if not DB.listOpen then return end
 
     -- rows
+    local list = BuildEntries()
+    local stripe = false
     for i, e in ipairs(list) do
         local row = GetRow(i)
-        row.questID, row.quest = e.id, e.q
-        local r, g, b = DifficultyColor(e.q.level)
-        local lvl = (e.q.level and e.q.level > 0) and ("[" .. e.q.level .. "] ") or ""
-        row.title:SetText(lvl .. (e.q.title or "?"))
-        row.title:SetTextColor(r, g, b)
-        row.zone:SetText(e.q.zone or "")
-        row.xp:SetText(Fmt(e.q.xp))
-        local alpha = e.active and 1 or 0.4
-        row.title:SetAlpha(alpha); row.zone:SetAlpha(alpha); row.xp:SetAlpha(alpha)
-        row.toggle:SetText(e.active and "Active" or "Inactive")
+        row.entry = e
+        if e.kind == "zone" then
+            FillZoneRow(row, e)
+            stripe = false
+        else
+            stripe = not stripe
+            FillQuestRow(row, e, stripe)
+        end
         row:Show()
     end
     for i = #list + 1, #rows do
         rows[i]:Hide()
-        rows[i].questID = nil
+        rows[i].entry = nil
     end
     emptyText:SetShown(#list == 0)
     content:SetHeight(math.max(#list * ROW_H, LIST_H))
@@ -596,10 +848,13 @@ events:SetScript("OnEvent", function(_, event, arg1)
         for k, v in pairs(DEFAULTS) do
             if DB[k] == nil then DB[k] = (type(v) == "table") and {} or v end
         end
+        if DB.sortKey == "zone" then DB.sortKey = "title" end -- column removed in 1.1
         if DB.point then
             frame:ClearAllPoints()
             frame:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
         end
+        PlaceMinimapButton()
+        minimapBtn:SetShown(not DB.minimap.hide)
         events:UnregisterEvent("ADDON_LOADED")
         SafeRegister("PLAYER_ENTERING_WORLD")
         SafeRegister("QUEST_LOG_UPDATE")
@@ -618,6 +873,7 @@ events:SetScript("OnEvent", function(_, event, arg1)
             QueueScan()
         end
     elseif event == "PLAYER_ENTERING_WORLD" then
+        PlaceMinimapButton()
         if DB.shown then frame:Show() end
         QueueScan()
     elseif (event == "QUEST_TURNED_IN" or event == "QUEST_REMOVED") and arg1 then
@@ -646,8 +902,12 @@ SlashCmdList.QUESTXPTRACKER = function(msg)
         print("|cffffd200Quest XP Tracker:|r window position reset.")
     elseif msg == "scan" then
         ScanQuestLog()
+    elseif msg == "minimap" then
+        DB.minimap.hide = not DB.minimap.hide
+        minimapBtn:SetShown(not DB.minimap.hide)
+        print("|cffffd200Quest XP Tracker:|r minimap button " .. (DB.minimap.hide and "hidden" or "shown") .. ".")
     else
-        frame:SetShown(not frame:IsShown())
+        ToggleWindow()
         if frame:IsShown() then QueueScan() end
     end
 end
