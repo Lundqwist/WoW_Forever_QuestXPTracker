@@ -2,7 +2,7 @@
 ## Title: Quest XP Tracker
 ## Notes: Lists the XP reward and zone of every quest in your quest log and shows how far the active ones take you toward the next level. /qxp
 ## Author: Lundqwist
-## Version: 1.2.0
+## Version: 1.2.1
 ## IconTexture: Interface\AddOns\QuestXPTracker\Media\QxpIcon
 ## OptionalDeps: Titan
 ## AddonCompartmentFunc: QuestXPTracker_OnAddonCompartmentClick

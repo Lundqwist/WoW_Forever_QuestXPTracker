@@ -46,11 +46,17 @@ local DEFAULTS = {
 local HAS_INFO = C_QuestLog and C_QuestLog.GetInfo and C_QuestLog.GetNumQuestLogEntries and true or false
 local IsOnQuest = C_QuestLog and C_QuestLog.IsOnQuest
 
+local MAX_QUESTS = 40 -- quest log cap on WoW Forever
+
+-- Returns the number of log entries (headers included) and the number of quests
 local function NumEntries()
+    local entries, quests
     if HAS_INFO then
-        return C_QuestLog.GetNumQuestLogEntries() or 0
+        entries, quests = C_QuestLog.GetNumQuestLogEntries()
+    else
+        entries, quests = GetNumQuestLogEntries()
     end
-    return (GetNumQuestLogEntries()) or 0
+    return entries or 0, quests
 end
 
 local function GetEntry(i)
@@ -317,6 +323,8 @@ end
 ----------------------------------------------------------------------------------------
 -- questUse[questID] = { objectives = { "Item: 1/5", ... }, special = itemID }
 local questUse = {}
+-- quest count reported by the game at the last scan (nil until the first scan)
+local logQuestCount
 -- itemList: built by ScanItems, shown in the quest items window
 local itemList = {}
 local itemStats = { total = 0, unused = 0 }
@@ -339,10 +347,17 @@ local function GetSummary()
     local maxLevel = GetMaxPlayerLevel and GetMaxPlayerLevel()
     s.atMax = (s.max == 0) or (maxLevel and s.level >= maxLevel) or false
     s.needed = math.max(s.max - s.cur, 0)
+    s.inLog = logQuestCount or s.count
     return s
 end
 
+local function QuestCountText(n)
+    local color = (n >= MAX_QUESTS) and "ff4040" or (n >= MAX_QUESTS - 5) and "ffd200" or "20ff20"
+    return string.format("|cff%s%d|r/%d", color, n, MAX_QUESTS)
+end
+
 local function AddSummaryLines(tt, s)
+    tt:AddDoubleLine("Quest log", QuestCountText(s.inLog), 1, 1, 1, 1, 1, 1)
     if s.atMax then
         tt:AddDoubleLine("Level", s.level .. " (max)", 1, 1, 1, 1, 1, 1)
     else
@@ -437,6 +452,20 @@ itemsBtn:SetScript("OnEnter", function(self)
     GameTooltip:Show()
 end)
 itemsBtn:SetScript("OnLeave", GameTooltip_Hide)
+
+-- "Quests 12/40" in the title bar
+local logCount = CreateFrame("Frame", nil, frame)
+logCount:SetSize(110, 20)
+logCount:SetPoint("RIGHT", itemsBtn, "LEFT", -8, 0)
+logCount:EnableMouse(true)
+logCount.text = logCount:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+logCount.text:SetPoint("RIGHT")
+logCount:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:AddLine("Quests in your log, out of the maximum " .. MAX_QUESTS)
+    GameTooltip:Show()
+end)
+logCount:SetScript("OnLeave", GameTooltip_Hide)
 
 -- XP bar: projected (current + active quest XP) behind, current XP in front
 projBar = CreateFrame("StatusBar", nil, frame)
@@ -1196,6 +1225,7 @@ Refresh = function()
         frame:SetHeight(DB.listOpen and DB.size.h or CLOSED_H)
     end
     mainGrip:SetShown(DB.listOpen)
+    logCount.text:SetText("|cffffffffQuests|r " .. QuestCountText(s.inLog))
 
     -- XP bar
     if s.atMax then
@@ -1277,7 +1307,8 @@ local function ScanQuestLog()
         Refresh()
         return
     end
-    local n = NumEntries()
+    local n, numQuests = NumEntries()
+    logQuestCount = Plain(numQuests)
     if n == 0 then
         -- Can be a not-yet-loaded log at login; only clear the cache when the game
         -- can confirm we're on none of the cached quests.

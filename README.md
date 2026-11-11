@@ -4,6 +4,7 @@ A World of Warcraft addon for **WoW Forever** (interface 16001) that keeps track
 
 ## Features
 
+- **Quest log count** in the title bar: quests in your log out of the maximum 40 (yellow from 35, red when full).
 - **XP bar**: your XP this level (purple), with the XP from all active quests layered on top (green).
 - **Summary**: XP needed for the next level, XP from active quests, and whether turning them all in levels you up (and how much spills over).
 - **Dropdown quest list** (click the +/- header), grouped by zone:
