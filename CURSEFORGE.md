@@ -6,6 +6,8 @@
 
 Made for **WoW Forever**. Type `/qxp`, click the **Qxp** minimap button or use the **Qxp** plugin on Titan Panel.
 
+![Quest XP Tracker in game](https://raw.githubusercontent.com/Lundqwist/WoW_Forever_QuestXPTracker/main/Media/IngameImage.png)
+
 ---
 
 ## How far do my quests take me?
@@ -25,7 +27,7 @@ Not enough yet? It tells you exactly how much is missing:
 Still short after turning them all in:  8,420 XP
 ```
 
-![Main window](https://raw.githubusercontent.com/Lundqwist/WoW_Forever_QuestXPTracker/main/Media/screenshots/main-window.png)
+![Main window](https://raw.githubusercontent.com/Lundqwist/WoW_Forever_QuestXPTracker/main/Media/MainWindow.png)
 
 ## Every quest, grouped by zone
 
@@ -72,7 +74,7 @@ The **Items** window docks to the right of the main window and lists the quest i
 
 Items that **no quest in your log needs any more** get a **big red cross**, a red row and the text "No longer needed". They're listed first, so you can clear some bag space before your next trip to town.
 
-![Quest items window](https://raw.githubusercontent.com/Lundqwist/WoW_Forever_QuestXPTracker/main/Media/screenshots/items-window.png)
+![Quest items window](https://raw.githubusercontent.com/Lundqwist/WoW_Forever_QuestXPTracker/main/Media/ItemList.png)
 
 ## Look it up on Wowhead
 
@@ -83,8 +85,6 @@ https://www.wowhead.com/forever/quest=783
 ```
 
 Press **Ctrl+C** to copy it (the box closes by itself), then paste it into your browser. Addons can't open a web browser themselves, so this is the quickest way there.
-
-![Wowhead link box](https://raw.githubusercontent.com/Lundqwist/WoW_Forever_QuestXPTracker/main/Media/screenshots/wowhead-link.png)
 
 ## Minimap button and Titan Panel
 
@@ -109,8 +109,6 @@ On Titan Panel the plugin's text shows the XP from active quests / the XP you ne
 - **Drag** the minimap button to move it around the minimap
 
 Any other LibDataBroker display shows the plugin too.
-
-![Titan Panel plugin](https://raw.githubusercontent.com/Lundqwist/WoW_Forever_QuestXPTracker/main/Media/screenshots/titan-panel.png)
 
 ## Make it your size
 

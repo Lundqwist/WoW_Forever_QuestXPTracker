@@ -41,6 +41,10 @@ Copy the folder into `World of Warcraft\_forever_\Interface\AddOns\` and name it
 .\tools\make-logo.ps1 -Size 64 -Tga Media\QxpIcon.tga
 ```
 
+## Packaging for CurseForge
+
+`.\tools\package.ps1` builds a `curseforge\` folder (not committed) with the upload zip `QuestXPTracker-<version>.zip`, `description.md`, a 400 px `avatar.png` and the screenshots from `Media`.
+
 ## Commands
 
 - `/qxp` or `/questxp`: show or hide the window
