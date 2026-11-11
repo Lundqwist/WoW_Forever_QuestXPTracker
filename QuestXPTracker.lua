@@ -1,23 +1,28 @@
 -- Quest XP Tracker
 -- Lists every quest in the quest log, grouped by zone, with its XP reward, and shows how
 -- far the XP from all *active* quests takes you toward the next level.
+-- A second window, docked to the right, lists the quest items in your bags, the quest
+-- that uses each one, and marks items no quest needs any more with a red cross.
 -- Also provides a minimap button and a LibDataBroker feed (shown by Titan Panel).
--- Works on Retail-style clients (WoW Forever, Midnight) through C_QuestLog and falls back
--- to the older GetQuestLogTitle / SelectQuestLogEntry API otherwise.
+-- Works on Retail-style clients (WoW Forever, Midnight) through C_QuestLog / C_Container
+-- and falls back to the older global API otherwise.
 
 local ADDON_NAME = ...
 local ICON = "Interface\\AddOns\\" .. ADDON_NAME .. "\\Media\\QxpIcon"
+local CROSS = "Interface\\RaidFrame\\ReadyCheck-NotReady"
 
 ----------------------------------------------------------------------------------------
 -- Saved data (per character)
 ----------------------------------------------------------------------------------------
 -- QuestXPTrackerDB = {
---   quests        = { [questID] = { title, level, zone, xp } },  -- cache, so quests under
---                                                                -- collapsed log headers stay listed
---   excluded      = { [questID] = true },                        -- "Inactive": not counted
---   collapsedZones = { [zone] = true },                          -- zone groups folded in our list
---   minimap       = { angle = degrees, hide = bool },
---   listOpen, sortKey, sortAsc, point = { point, relPoint, x, y }, shown
+--   quests         = { [questID] = { title, level, zone, xp } },  -- cache, so quests under
+--                                                                 -- collapsed log headers stay listed
+--   excluded       = { [questID] = true },                        -- "Inactive": not counted
+--   collapsedZones = { [zone] = true },                           -- zone groups folded in our list
+--   minimap        = { angle = degrees, hide = bool },
+--   size           = { w, h },       -- main window (height used while the list is open)
+--   itemSize       = { w, h },       -- quest items window
+--   itemsShown, listOpen, sortKey, sortAsc, point = { point, relPoint, x, y }, shown
 -- }
 local DB
 
@@ -26,6 +31,9 @@ local DEFAULTS = {
     excluded       = {},
     collapsedZones = {},
     minimap        = {},
+    size           = { w = 480, h = 432 },
+    itemSize       = { w = 300, h = 432 },
+    itemsShown     = true,
     listOpen       = true,
     sortKey        = "xp",
     sortAsc        = false,
@@ -85,6 +93,99 @@ local function ReadXP(index, questID)
     return Plain(GetQuestLogRewardXP()) or 0
 end
 
+-- Objective texts ("Linen Cloth: 3/6") of a quest in the log
+local function ReadObjectives(index, questID)
+    local texts = {}
+    if C_QuestLog and C_QuestLog.GetQuestObjectives then
+        local ok, objs = pcall(C_QuestLog.GetQuestObjectives, questID)
+        if ok and objs then
+            for _, o in ipairs(objs) do
+                local t = Plain(o.text)
+                if t and t ~= "" then texts[#texts + 1] = t end
+            end
+            return texts
+        end
+    end
+    if GetNumQuestLeaderBoards and GetQuestLogLeaderBoard then
+        for j = 1, (GetNumQuestLeaderBoards(index) or 0) do
+            local t = GetQuestLogLeaderBoard(j, index)
+            if t and t ~= "" then texts[#texts + 1] = t end
+        end
+    end
+    return texts
+end
+
+-- The usable item shown next to a quest in the tracker, if any
+local function ReadSpecialItem(index)
+    if not GetQuestLogSpecialItemInfo then return nil end
+    local ok, link = pcall(GetQuestLogSpecialItemInfo, index)
+    if ok and type(link) == "string" then
+        return tonumber(link:match("item:(%d+)"))
+    end
+end
+
+local function QuestTitleByID(questID)
+    if C_QuestLog and C_QuestLog.GetTitleForQuestID then
+        local t = C_QuestLog.GetTitleForQuestID(questID)
+        if t and t ~= "" then return t end
+    end
+    if QuestUtils_GetQuestName then
+        local t = QuestUtils_GetQuestName(questID)
+        if t and t ~= "" then return t end
+    end
+    return "Quest #" .. questID
+end
+
+local function IsQuestDone(questID)
+    if C_QuestLog and C_QuestLog.IsQuestFlaggedCompleted then
+        return C_QuestLog.IsQuestFlaggedCompleted(questID)
+    end
+    if IsQuestFlaggedCompleted then return IsQuestFlaggedCompleted(questID) end
+    return false
+end
+
+----------------------------------------------------------------------------------------
+-- Bag API wrappers
+----------------------------------------------------------------------------------------
+local QUEST_CLASS = (Enum and Enum.ItemClass and Enum.ItemClass.Questitem) or 12
+
+local function NumSlots(bag)
+    if C_Container and C_Container.GetContainerNumSlots then
+        return C_Container.GetContainerNumSlots(bag) or 0
+    end
+    return GetContainerNumSlots and GetContainerNumSlots(bag) or 0
+end
+
+local function SlotItem(bag, slot)
+    if C_Container and C_Container.GetContainerItemInfo then
+        local info = C_Container.GetContainerItemInfo(bag, slot)
+        if info then return info.itemID, info.stackCount, info.hyperlink, info.iconFileID end
+        return nil
+    end
+    if GetContainerItemInfo then
+        local icon, count, _, _, _, _, link, _, _, itemID = GetContainerItemInfo(bag, slot)
+        return itemID, count, link, icon
+    end
+end
+
+local function SlotQuestInfo(bag, slot)
+    if C_Container and C_Container.GetContainerItemQuestInfo then
+        local qi = C_Container.GetContainerItemQuestInfo(bag, slot)
+        if qi then return qi.isQuestItem, qi.questID, qi.isActive end
+        return nil
+    end
+    if GetContainerItemQuestInfo then return GetContainerItemQuestInfo(bag, slot) end
+end
+
+local function ItemClassID(itemID)
+    local f = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+    if not f then return nil end
+    local _, _, _, _, _, classID = f(itemID)
+    return classID
+end
+
+local LAST_BAG = NUM_TOTAL_EQUIPPED_BAG_SLOTS or NUM_BAG_SLOTS or 4
+
 ----------------------------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------------------------
@@ -101,6 +202,7 @@ local function IsActive(questID)
 end
 
 local function QuestLink(questID, q)
+    q = q or {}
     if GetQuestLink then
         local ok, link
         if HAS_INFO then
@@ -110,10 +212,21 @@ local function QuestLink(questID, q)
         end
         if ok and link then return link end
     end
-    return string.format("|cffffff00|Hquest:%d:%d|h[%s]|h|r", questID, q.level or 0, q.title or "?")
+    return string.format("|cffffff00|Hquest:%d:%d|h[%s]|h|r", questID, q.level or 0, q.title or QuestTitleByID(questID))
+end
+
+local function InsertChatLink(link)
+    if not link then return end
+    if ChatEdit_InsertLink and ChatEdit_InsertLink(link) then return end
+    if ChatFrame_OpenChat then ChatFrame_OpenChat(link) end
+end
+
+local function WantsLink()
+    return (IsModifiedClick and IsModifiedClick("CHATLINK")) or IsShiftKeyDown()
 end
 
 local function OpenQuest(questID, q)
+    q = q or {}
     if HAS_INFO and QuestMapFrame_OpenToQuestDetails then
         QuestMapFrame_OpenToQuestDetails(questID)
         return
@@ -136,6 +249,77 @@ local function DifficultyColor(level)
     end
     return 1, 0.82, 0
 end
+
+local function SetQuestTooltip(owner, questID, q, anchor)
+    GameTooltip:SetOwner(owner, anchor or "ANCHOR_RIGHT")
+    local ok = pcall(GameTooltip.SetHyperlink, GameTooltip, "quest:" .. questID .. ":" .. ((q and q.level) or 0))
+    if not ok then
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine((q and q.title) or QuestTitleByID(questID))
+    end
+end
+
+local function SmallButton(parent, text, w)
+    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    b:SetSize(w, 18)
+    b:SetText(text)
+    b:SetNormalFontObject("GameFontNormalSmall")
+    b:SetHighlightFontObject("GameFontHighlightSmall")
+    b:SetDisabledFontObject("GameFontDisableSmall")
+    return b
+end
+
+local function SetBounds(f, minW, minH, maxW, maxH)
+    if f.SetResizeBounds then
+        f:SetResizeBounds(minW, minH, maxW, maxH)
+    else
+        if f.SetMinResize then f:SetMinResize(minW, minH) end
+        if f.SetMaxResize then f:SetMaxResize(maxW, maxH) end
+    end
+end
+
+-- Size grip in the bottom-right corner
+local function AddResizeGrip(f, onDone)
+    f:SetResizable(true)
+    local grip = CreateFrame("Button", nil, f)
+    grip:SetSize(16, 16)
+    grip:SetPoint("BOTTOMRIGHT", -4, 4)
+    grip:SetFrameLevel(f:GetFrameLevel() + 10)
+    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+    grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    grip:SetScript("OnMouseDown", function(_, button)
+        if button ~= "LeftButton" then return end
+        f.isSizing = true
+        f:StartSizing("BOTTOMRIGHT")
+    end)
+    grip:SetScript("OnMouseUp", function()
+        f:StopMovingOrSizing()
+        f.isSizing = false
+        if onDone then onDone(f) end
+    end)
+    return grip
+end
+
+local function NewScrollList(parent, name)
+    local scroll = CreateFrame("ScrollFrame", name, parent, "UIPanelScrollFrameTemplate")
+    local content = CreateFrame("Frame", nil, scroll)
+    content:SetSize(100, 100)
+    scroll:SetScrollChild(content)
+    scroll:SetScript("OnSizeChanged", function(self, w)
+        content:SetWidth(w)
+    end)
+    return scroll, content
+end
+
+----------------------------------------------------------------------------------------
+-- Quest use data (filled while scanning the quest log, not saved)
+----------------------------------------------------------------------------------------
+-- questUse[questID] = { objectives = { "Item: 1/5", ... }, special = itemID }
+local questUse = {}
+-- itemList: built by ScanItems, shown in the quest items window
+local itemList = {}
+local itemStats = { total = 0, unused = 0 }
 
 ----------------------------------------------------------------------------------------
 -- Totals (shared by the window, the minimap tooltip and the Titan / LDB feed)
@@ -173,32 +357,39 @@ local function AddSummaryLines(tt, s)
             tt:AddLine(string.format("Short by %s XP after turning in.", Fmt(s.needed - s.total)), 1, 0.5, 0.25)
         end
     end
+    if itemStats.total > 0 then
+        if itemStats.unused > 0 then
+            tt:AddDoubleLine("Quest items", string.format("%d  (|cffff4040%d not needed|r)", itemStats.total, itemStats.unused), 1, 1, 1, 1, 1, 1)
+        else
+            tt:AddDoubleLine("Quest items", itemStats.total, 1, 1, 1, 1, 1, 1)
+        end
+    end
 end
 
 ----------------------------------------------------------------------------------------
 -- Main window
 ----------------------------------------------------------------------------------------
-local FRAME_W   = 480
-local ROW_H     = 18
-local LIST_ROWS = 14
-local LIST_H    = ROW_H * LIST_ROWS
-local CONTENT_W = FRAME_W - 16 - 30   -- room for the scroll bar
-local INDENT    = 18
-
--- column x-offsets / widths inside a row
-local COL = {
-    title = { x = 4,   w = 300 },
-    xp    = { x = 308, w = 64 },
-    btn   = { x = 378, w = 56 },
-}
+local ROW_H      = 18
+local INDENT     = 18
+local TOP_H      = 150   -- everything above the quest list
+local CLOSED_H   = 138   -- window height with the list folded
+local BOTTOM_PAD = 30    -- room under the list for the size grip
+local MAIN_MIN_W, MAIN_MIN_H = 420, TOP_H + ROW_H * 5 + BOTTOM_PAD
+local BTN_W, XP_W = 56, 64
 
 local frame, bar, projBar, barText, lineNeeded, lineQuests, lineResult
-local dropBtn, dropIcon, dropText, colHeader, scroll, content, emptyText
+local dropBtn, dropIcon, dropText, colHeader, scroll, content, emptyText, mainGrip
+local itemsFrame -- quest items window (created further down)
 local rows = {}
-local Refresh -- forward declaration
+local Refresh, RefreshItems -- forward declarations
+
+local function SavePosition()
+    local p, _, rp, x, y = frame:GetPoint()
+    if DB and p then DB.point = { p, rp, x, y } end
+end
 
 frame = CreateFrame("Frame", "QuestXPTrackerFrame", UIParent, "BackdropTemplate")
-frame:SetSize(FRAME_W, 140)
+frame:SetSize(480, CLOSED_H)
 frame:SetPoint("CENTER")
 frame:SetFrameStrata("MEDIUM")
 frame:SetClampedToScreen(true)
@@ -215,13 +406,12 @@ frame:SetBackdropBorderColor(0.6, 0.6, 0.6, 1)
 frame:SetScript("OnDragStart", frame.StartMoving)
 frame:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
-    local p, _, rp, x, y = self:GetPoint()
-    if DB then DB.point = { p, rp, x, y } end
+    SavePosition()
 end)
 frame:SetScript("OnHide", function() if DB then DB.shown = false end end)
 frame:SetScript("OnShow", function() if DB then DB.shown = true end; if Refresh then Refresh() end end)
 frame:Hide()
-tinsert(UISpecialFrames, "QuestXPTrackerFrame") -- Escape closes it
+tinsert(UISpecialFrames, "QuestXPTrackerFrame") -- Escape closes it (and the docked items window)
 
 local titleIcon = frame:CreateTexture(nil, "OVERLAY")
 titleIcon:SetSize(20, 20)
@@ -235,10 +425,24 @@ title:SetText("Quest XP Tracker")
 local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
 close:SetPoint("TOPRIGHT", -2, -2)
 
+local itemsBtn = SmallButton(frame, "Items", 60)
+itemsBtn:SetPoint("RIGHT", close, "LEFT", -2, 0)
+itemsBtn:SetScript("OnClick", function()
+    DB.itemsShown = not DB.itemsShown
+    itemsFrame:SetShown(DB.itemsShown)
+end)
+itemsBtn:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:AddLine("Show / hide the quest items window")
+    GameTooltip:Show()
+end)
+itemsBtn:SetScript("OnLeave", GameTooltip_Hide)
+
 -- XP bar: projected (current + active quest XP) behind, current XP in front
 projBar = CreateFrame("StatusBar", nil, frame)
 projBar:SetPoint("TOPLEFT", 12, -34)
-projBar:SetSize(FRAME_W - 24, 20)
+projBar:SetPoint("TOPRIGHT", -12, -34)
+projBar:SetHeight(20)
 projBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
 projBar:SetStatusBarColor(0.1, 0.85, 0.2, 0.55)
 local barBg = projBar:CreateTexture(nil, "BACKGROUND")
@@ -270,17 +474,23 @@ projBar:SetScript("OnEnter", function(self)
 end)
 projBar:SetScript("OnLeave", GameTooltip_Hide)
 
-lineNeeded = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-lineNeeded:SetPoint("TOPLEFT", 14, -62)
-lineQuests = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-lineQuests:SetPoint("TOPLEFT", 14, -76)
-lineResult = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-lineResult:SetPoint("TOPLEFT", 14, -90)
+local function InfoLine(y)
+    local fs = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    fs:SetPoint("TOPLEFT", 14, y)
+    fs:SetPoint("TOPRIGHT", -14, y)
+    fs:SetJustifyH("LEFT")
+    fs:SetWordWrap(false)
+    return fs
+end
+lineNeeded = InfoLine(-62)
+lineQuests = InfoLine(-76)
+lineResult = InfoLine(-90)
 
 -- Dropdown header
 dropBtn = CreateFrame("Button", nil, frame)
 dropBtn:SetPoint("TOPLEFT", 10, -108)
-dropBtn:SetSize(FRAME_W - 150, 20)
+dropBtn:SetPoint("TOPRIGHT", -150, -108)
+dropBtn:SetHeight(20)
 dropIcon = dropBtn:CreateTexture(nil, "ARTWORK")
 dropIcon:SetSize(14, 14)
 dropIcon:SetPoint("LEFT", 2, 0)
@@ -293,16 +503,6 @@ dropBtn:SetScript("OnClick", function()
     DB.listOpen = not DB.listOpen
     Refresh()
 end)
-
-local function SmallButton(parent, text, w)
-    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    b:SetSize(w, 18)
-    b:SetText(text)
-    b:SetNormalFontObject("GameFontNormalSmall")
-    b:SetHighlightFontObject("GameFontHighlightSmall")
-    b:SetDisabledFontObject("GameFontDisableSmall")
-    return b
-end
 
 local allOn = SmallButton(frame, "All active", 64)
 allOn:SetPoint("TOPRIGHT", -78, -109)
@@ -317,16 +517,16 @@ allOff:SetScript("OnClick", function()
     Refresh()
 end)
 
--- Column headers (click to sort)
+-- Column headers (click to sort); laid out from the right so they follow the width
 colHeader = CreateFrame("Frame", nil, frame)
 colHeader:SetPoint("TOPLEFT", 12, -132)
-colHeader:SetSize(CONTENT_W, 16)
+colHeader:SetPoint("TOPRIGHT", -30, -132)
+colHeader:SetHeight(16)
 
 local headerButtons = {}
-local function HeaderButton(key, label, col, justify)
+local function HeaderButton(key, label, justify)
     local b = CreateFrame("Button", nil, colHeader)
-    b:SetPoint("TOPLEFT", col.x, 0)
-    b:SetSize(col.w, 16)
+    b:SetHeight(16)
     local fs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     fs:SetAllPoints()
     fs:SetJustifyH(justify or "LEFT")
@@ -343,30 +543,40 @@ local function HeaderButton(key, label, col, justify)
     headerButtons[#headerButtons + 1] = b
     return b
 end
-HeaderButton("title",  "Zone / Quest", COL.title)
-HeaderButton("xp",     "XP",           COL.xp, "RIGHT")
-HeaderButton("active", "Counted",      COL.btn, "CENTER")
+local hCounted = HeaderButton("active", "Counted", "CENTER")
+hCounted:SetPoint("TOPRIGHT", -2, 0)
+hCounted:SetWidth(BTN_W)
+local hXP = HeaderButton("xp", "XP", "RIGHT")
+hXP:SetPoint("TOPRIGHT", hCounted, "TOPLEFT", -6, 0)
+hXP:SetWidth(XP_W)
+local hTitle = HeaderButton("title", "Zone / Quest")
+hTitle:SetPoint("TOPLEFT", 4, 0)
+hTitle:SetPoint("TOPRIGHT", hXP, "TOPLEFT", -4, 0)
 
--- Scrolling list
-scroll = CreateFrame("ScrollFrame", "QuestXPTrackerScroll", frame, "UIPanelScrollFrameTemplate")
-scroll:SetPoint("TOPLEFT", 12, -150)
-scroll:SetSize(CONTENT_W, LIST_H)
-content = CreateFrame("Frame", nil, scroll)
-content:SetSize(CONTENT_W, LIST_H)
-scroll:SetScrollChild(content)
+-- Scrolling list (fills the rest of the window)
+scroll, content = NewScrollList(frame, "QuestXPTrackerScroll")
+scroll:SetPoint("TOPLEFT", 12, -TOP_H)
+scroll:SetPoint("BOTTOMRIGHT", -30, BOTTOM_PAD)
 
 emptyText = content:CreateFontString(nil, "OVERLAY", "GameFontDisable")
 emptyText:SetPoint("TOP", 0, -20)
 emptyText:SetText("Your quest log is empty.")
 
+mainGrip = AddResizeGrip(frame, function(f)
+    DB.size.w, DB.size.h = f:GetWidth(), f:GetHeight()
+    SavePosition()
+    Refresh()
+end)
+SetBounds(frame, MAIN_MIN_W, MAIN_MIN_H, 1000, 1000)
+
 ----------------------------------------------------------------------------------------
--- List rows: one frame type used for both zone headers and quests
+-- Quest list rows: one frame type used for both zone headers and quests
 ----------------------------------------------------------------------------------------
 local function Row_OnEnter(self)
     local e = self.entry
     if not e then return end
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     if e.kind == "zone" then
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:AddLine(e.zone)
         GameTooltip:AddDoubleLine("Quests", e.count, 1, 1, 1, 1, 1, 1)
         GameTooltip:AddDoubleLine("Active", e.active, 1, 1, 1, 1, 1, 1)
@@ -374,11 +584,7 @@ local function Row_OnEnter(self)
         GameTooltip:AddLine("Click to fold or unfold.", 0.6, 0.6, 0.6)
     else
         local q = e.q
-        local ok = pcall(GameTooltip.SetHyperlink, GameTooltip, "quest:" .. e.id .. ":" .. (q.level or 0))
-        if not ok then
-            GameTooltip:ClearLines()
-            GameTooltip:AddLine(q.title)
-        end
+        SetQuestTooltip(self, e.id, q)
         GameTooltip:AddLine(" ")
         GameTooltip:AddDoubleLine("XP reward", Fmt(q.xp), 1, 1, 1, 1, 1, 1)
         GameTooltip:AddDoubleLine("Zone", q.zone or "?", 1, 1, 1, 1, 1, 1)
@@ -395,10 +601,8 @@ local function Row_OnClick(self)
         Refresh()
         return
     end
-    if (IsModifiedClick and IsModifiedClick("CHATLINK")) or IsShiftKeyDown() then
-        local link = QuestLink(e.id, e.q)
-        if ChatEdit_InsertLink and ChatEdit_InsertLink(link) then return end
-        if ChatFrame_OpenChat then ChatFrame_OpenChat(link) end
+    if WantsLink() then
+        InsertChatLink(QuestLink(e.id, e.q))
     else
         OpenQuest(e.id, e.q)
     end
@@ -424,8 +628,9 @@ end
 local function GetRow(i)
     if rows[i] then return rows[i] end
     local row = CreateFrame("Button", nil, content)
-    row:SetSize(CONTENT_W, ROW_H)
+    row:SetHeight(ROW_H)
     row:SetPoint("TOPLEFT", 0, -(i - 1) * ROW_H)
+    row:SetPoint("RIGHT", content, "RIGHT")
     row:RegisterForClicks("LeftButtonUp")
 
     row.bg = row:CreateTexture(nil, "BACKGROUND")
@@ -436,21 +641,21 @@ local function GetRow(i)
 
     row.fold = row:CreateTexture(nil, "ARTWORK")
     row.fold:SetSize(12, 12)
-    row.fold:SetPoint("LEFT", COL.title.x, 0)
+    row.fold:SetPoint("LEFT", 4, 0)
+
+    row.toggle = SmallButton(row, "Active", BTN_W)
+    row.toggle:SetHeight(ROW_H - 2)
+    row.toggle:SetPoint("RIGHT", -2, 0)
+    row.toggle:SetScript("OnClick", Toggle_OnClick)
+
+    row.xp = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.xp:SetPoint("RIGHT", row.toggle, "LEFT", -6, 0)
+    row.xp:SetWidth(XP_W)
+    row.xp:SetJustifyH("RIGHT")
 
     row.title = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     row.title:SetJustifyH("LEFT")
     row.title:SetWordWrap(false)
-
-    row.xp = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    row.xp:SetPoint("LEFT", COL.xp.x, 0)
-    row.xp:SetWidth(COL.xp.w)
-    row.xp:SetJustifyH("RIGHT")
-
-    row.toggle = SmallButton(row, "Active", COL.btn.w)
-    row.toggle:SetHeight(ROW_H - 2)
-    row.toggle:SetPoint("LEFT", COL.btn.x, 0)
-    row.toggle:SetScript("OnClick", Toggle_OnClick)
 
     row:SetScript("OnEnter", Row_OnEnter)
     row:SetScript("OnLeave", GameTooltip_Hide)
@@ -462,14 +667,14 @@ end
 local function SetRowTitle(row, x)
     row.title:ClearAllPoints()
     row.title:SetPoint("LEFT", x, 0)
-    row.title:SetWidth(COL.title.w - (x - COL.title.x))
+    row.title:SetPoint("RIGHT", row.xp, "LEFT", -4, 0)
 end
 
 local function FillZoneRow(row, e)
     row.bg:SetColorTexture(0.35, 0.2, 0.55, 0.35)
     row.fold:Show()
     row.fold:SetTexture(DB.collapsedZones[e.zone] and "Interface\\Buttons\\UI-PlusButton-Up" or "Interface\\Buttons\\UI-MinusButton-Up")
-    SetRowTitle(row, COL.title.x + 16)
+    SetRowTitle(row, 20)
     row.title:SetFontObject("GameFontNormal")
     row.title:SetText(string.format("%s  |cffaaaaaa(%d/%d)|r", e.zone, e.active, e.count))
     row.title:SetTextColor(1, 0.82, 0)
@@ -487,7 +692,7 @@ end
 local function FillQuestRow(row, e, stripe)
     row.bg:SetColorTexture(1, 1, 1, stripe and 0.04 or 0)
     row.fold:Hide()
-    SetRowTitle(row, COL.title.x + INDENT)
+    SetRowTitle(row, 4 + INDENT)
     local r, g, b = DifficultyColor(e.q.level)
     local lvl = (e.q.level and e.q.level > 0) and ("[" .. e.q.level .. "] ") or ""
     row.title:SetFontObject("GameFontNormalSmall")
@@ -500,7 +705,7 @@ local function FillQuestRow(row, e, stripe)
 end
 
 ----------------------------------------------------------------------------------------
--- Building the grouped list
+-- Building the grouped quest list
 ----------------------------------------------------------------------------------------
 local function Compare(va, vb, asc, tieA, tieB)
     if va == vb then return tieA < tieB end
@@ -547,6 +752,308 @@ local function BuildEntries()
         end
     end
     return list
+end
+
+----------------------------------------------------------------------------------------
+-- Quest items window (docked to the right of the main window)
+----------------------------------------------------------------------------------------
+local ITEM_ROW_H = 36
+local ITEMS_MIN_W, ITEMS_MIN_H = 240, 160
+local itemRows = {}
+local itemsScroll, itemsContent, itemsSummary, itemsEmpty
+
+local function DockItemsFrame()
+    itemsFrame:ClearAllPoints()
+    itemsFrame:SetPoint("TOPLEFT", frame, "TOPRIGHT", 2, 0)
+end
+
+itemsFrame = CreateFrame("Frame", "QuestXPTrackerItemsFrame", frame, "BackdropTemplate")
+itemsFrame:SetSize(300, 432)
+itemsFrame:SetClampedToScreen(true)
+itemsFrame:SetMovable(true) -- needed for StartSizing; the window stays docked
+itemsFrame:EnableMouse(true)
+itemsFrame:SetBackdrop({
+    bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = true, tileSize = 16, edgeSize = 16,
+    insets = { left = 4, right = 4, top = 4, bottom = 4 },
+})
+itemsFrame:SetBackdropBorderColor(0.6, 0.6, 0.6, 1)
+DockItemsFrame()
+itemsFrame:SetScript("OnShow", function() if RefreshItems then RefreshItems() end end)
+
+local itemsTitle = itemsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+itemsTitle:SetPoint("TOPLEFT", 12, -12)
+itemsTitle:SetText("Quest items")
+
+local itemsClose = CreateFrame("Button", nil, itemsFrame, "UIPanelCloseButton")
+itemsClose:SetPoint("TOPRIGHT", -2, -2)
+itemsClose:SetScript("OnClick", function()
+    DB.itemsShown = false
+    itemsFrame:Hide()
+end)
+
+itemsSummary = itemsFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+itemsSummary:SetPoint("TOPLEFT", 12, -32)
+itemsSummary:SetPoint("TOPRIGHT", -12, -32)
+itemsSummary:SetJustifyH("LEFT")
+itemsSummary:SetWordWrap(false)
+
+itemsScroll, itemsContent = NewScrollList(itemsFrame, "QuestXPTrackerItemsScroll")
+itemsScroll:SetPoint("TOPLEFT", 10, -50)
+itemsScroll:SetPoint("BOTTOMRIGHT", -30, BOTTOM_PAD)
+
+itemsEmpty = itemsContent:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+itemsEmpty:SetPoint("TOP", 0, -20)
+itemsEmpty:SetText("No quest items in your bags.")
+
+AddResizeGrip(itemsFrame, function(f)
+    DB.itemSize.w, DB.itemSize.h = f:GetWidth(), f:GetHeight()
+    DockItemsFrame() -- sizing can turn the anchor into a screen position; dock it again
+    RefreshItems()
+end)
+SetBounds(itemsFrame, ITEMS_MIN_W, ITEMS_MIN_H, 800, 1000)
+
+local function ItemRow_OnEnter(self)
+    local it = self.item
+    if not it then return end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    local ok = pcall(GameTooltip.SetBagItem, GameTooltip, it.bag, it.slot)
+    if not ok or GameTooltip:NumLines() == 0 then
+        pcall(GameTooltip.SetHyperlink, GameTooltip, it.link)
+    end
+    GameTooltip:AddLine(" ")
+    if #it.uses > 0 then
+        for _, u in ipairs(it.uses) do
+            GameTooltip:AddLine("Used by: " .. u.title, 0.2, 1, 0.3)
+        end
+    elseif it.starts then
+        GameTooltip:AddLine("Starts: " .. QuestTitleByID(it.starts), 1, 0.82, 0)
+    else
+        GameTooltip:AddLine("No quest in your log needs this item.", 1, 0.25, 0.25)
+    end
+    GameTooltip:AddLine("Shift-click: link the item in chat.", 0.6, 0.6, 0.6)
+    GameTooltip:Show()
+end
+
+local function ItemRow_OnClick(self)
+    if self.item and WantsLink() then InsertChatLink(self.item.link) end
+end
+
+local function ItemQuest_OnEnter(self)
+    local id = self.questID
+    if not id then return end
+    SetQuestTooltip(self, id, DB.quests[id])
+    local it = self:GetParent().item
+    if it and #it.uses > 1 then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Also used by:", 1, 1, 1)
+        for i = 2, #it.uses do GameTooltip:AddLine(it.uses[i].title, 0.2, 1, 0.3) end
+    end
+    GameTooltip:AddLine("Shift-click: link the quest. Click: open it in the quest log.", 0.6, 0.6, 0.6)
+    GameTooltip:Show()
+end
+
+local function ItemQuest_OnClick(self)
+    local id = self.questID
+    if not id then return end
+    if WantsLink() then
+        InsertChatLink(QuestLink(id, DB.quests[id]))
+    elseif DB.quests[id] then
+        OpenQuest(id, DB.quests[id])
+    end
+end
+
+local function GetItemRow(i)
+    if itemRows[i] then return itemRows[i] end
+    local row = CreateFrame("Button", nil, itemsContent)
+    row:SetHeight(ITEM_ROW_H)
+    row:SetPoint("TOPLEFT", 0, -(i - 1) * ITEM_ROW_H)
+    row:SetPoint("RIGHT", itemsContent, "RIGHT")
+    row:RegisterForClicks("LeftButtonUp")
+
+    row.bg = row:CreateTexture(nil, "BACKGROUND")
+    row.bg:SetAllPoints()
+    local hl = row:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(1, 0.82, 0, 0.10)
+
+    row.icon = row:CreateTexture(nil, "ARTWORK")
+    row.icon:SetSize(30, 30)
+    row.icon:SetPoint("LEFT", 4, 0)
+
+    row.count = row:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
+    row.count:SetPoint("BOTTOMRIGHT", row.icon, "BOTTOMRIGHT", -1, 1)
+
+    -- the big red cross for items no quest needs any more
+    row.cross = row:CreateTexture(nil, "OVERLAY", nil, 7)
+    row.cross:SetSize(38, 38)
+    row.cross:SetPoint("CENTER", row.icon, "CENTER")
+    row.cross:SetTexture(CROSS)
+
+    row.name = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    row.name:SetPoint("TOPLEFT", row.icon, "TOPRIGHT", 8, -1)
+    row.name:SetPoint("TOPRIGHT", -4, -4)
+    row.name:SetJustifyH("LEFT")
+    row.name:SetWordWrap(false)
+
+    row.quest = CreateFrame("Button", nil, row)
+    row.quest:SetPoint("BOTTOMLEFT", row.icon, "BOTTOMRIGHT", 8, 0)
+    row.quest:SetPoint("BOTTOMRIGHT", -4, 3)
+    row.quest:SetHeight(14)
+    row.quest:RegisterForClicks("LeftButtonUp")
+    row.quest.text = row.quest:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.quest.text:SetAllPoints()
+    row.quest.text:SetJustifyH("LEFT")
+    row.quest.text:SetWordWrap(false)
+    row.quest:SetScript("OnEnter", ItemQuest_OnEnter)
+    row.quest:SetScript("OnLeave", GameTooltip_Hide)
+    row.quest:SetScript("OnClick", ItemQuest_OnClick)
+
+    row:SetScript("OnEnter", ItemRow_OnEnter)
+    row:SetScript("OnLeave", GameTooltip_Hide)
+    row:SetScript("OnClick", ItemRow_OnClick)
+    itemRows[i] = row
+    return row
+end
+
+RefreshItems = function()
+    if not DB or not itemsFrame:IsVisible() then return end
+    if not itemsFrame.isSizing then
+        itemsFrame:SetSize(DB.itemSize.w, DB.itemSize.h)
+    end
+    if itemStats.unused > 0 then
+        itemsSummary:SetText(string.format("%d item(s), |cffff4040%d not needed by any quest|r", itemStats.total, itemStats.unused))
+    else
+        itemsSummary:SetText(string.format("%d item(s), all used by your quests", itemStats.total))
+    end
+
+    for i, it in ipairs(itemList) do
+        local row = GetItemRow(i)
+        row.item = it
+        row.icon:SetTexture(it.icon)
+        row.count:SetText(it.count > 1 and it.count or "")
+        row.name:SetText(it.link or it.name)
+        if #it.uses > 0 then
+            local u = it.uses[1]
+            local more = (#it.uses > 1) and string.format("  |cffaaaaaa(+%d)|r", #it.uses - 1) or ""
+            row.quest.questID = u.questID
+            row.quest.text:SetText("|cff20ff20> |r" .. u.title .. more)
+            row.quest.text:SetTextColor(1, 1, 1)
+            row.cross:Hide()
+            row.icon:SetDesaturated(false)
+            row.bg:SetColorTexture(1, 1, 1, (i % 2 == 0) and 0.04 or 0)
+        elseif it.starts then
+            row.quest.questID = it.starts
+            row.quest.text:SetText("|cffffd200Starts:|r " .. QuestTitleByID(it.starts))
+            row.quest.text:SetTextColor(1, 1, 1)
+            row.cross:Hide()
+            row.icon:SetDesaturated(false)
+            row.bg:SetColorTexture(1, 0.82, 0, 0.06)
+        else
+            row.quest.questID = nil
+            row.quest.text:SetText("No longer needed")
+            row.quest.text:SetTextColor(1, 0.25, 0.25)
+            row.cross:Show()
+            row.icon:SetDesaturated(true)
+            row.bg:SetColorTexture(0.8, 0, 0, 0.18)
+        end
+        row:Show()
+    end
+    for i = #itemList + 1, #itemRows do
+        itemRows[i]:Hide()
+        itemRows[i].item = nil
+    end
+    itemsEmpty:SetShown(#itemList == 0)
+    itemsContent:SetHeight(math.max(#itemList * ITEM_ROW_H, itemsScroll:GetHeight()))
+end
+
+----------------------------------------------------------------------------------------
+-- Bag scan: which quest items do we carry, and which quest uses each
+----------------------------------------------------------------------------------------
+local function QuestsUsingItem(itemID, name)
+    local uses = {}
+    for questID, u in pairs(questUse) do
+        local q = DB.quests[questID]
+        if q then
+            local hit = (u.special == itemID)
+            if not hit and name and name ~= "" then
+                for _, t in ipairs(u.objectives) do
+                    if t:find(name, 1, true) then hit = true; break end
+                end
+            end
+            if hit then uses[#uses + 1] = { questID = questID, title = q.title or QuestTitleByID(questID) } end
+        end
+    end
+    table.sort(uses, function(a, b) return a.title < b.title end)
+    return uses
+end
+
+local function ScanItems()
+    if not DB then return end
+    local byID, order = {}, {}
+    for bag = 0, LAST_BAG do
+        for slot = 1, NumSlots(bag) do
+            local itemID, count, link, icon = SlotItem(bag, slot)
+            if itemID then
+                local it = byID[itemID]
+                if it then
+                    it.count = it.count + (count or 1)
+                else
+                    local isQuestItem, startsID, isActive = SlotQuestInfo(bag, slot)
+                    it = {
+                        itemID = itemID, count = count or 1, link = link, icon = icon,
+                        bag = bag, slot = slot,
+                        name = link and link:match("%[(.-)%]") or "",
+                        questClass = isQuestItem or (ItemClassID(itemID) == QUEST_CLASS),
+                        startsID = startsID, startsActive = isActive,
+                    }
+                    byID[itemID] = it
+                    order[#order + 1] = it
+                end
+            end
+        end
+    end
+
+    wipe(itemList)
+    local unused = 0
+    for _, it in ipairs(order) do
+        it.uses = QuestsUsingItem(it.itemID, it.name)
+        if it.startsID and it.startsID > 0 then
+            if it.startsActive and DB.quests[it.startsID] then
+                local found
+                for _, u in ipairs(it.uses) do if u.questID == it.startsID then found = true end end
+                if not found then
+                    table.insert(it.uses, 1, { questID = it.startsID, title = DB.quests[it.startsID].title or QuestTitleByID(it.startsID) })
+                end
+            elseif not it.startsActive and not IsQuestDone(it.startsID) then
+                it.starts = it.startsID
+            end
+        end
+        if it.questClass or #it.uses > 0 or it.starts then
+            it.unused = (#it.uses == 0 and not it.starts)
+            if it.unused then unused = unused + 1 end
+            itemList[#itemList + 1] = it
+        end
+    end
+    -- not-needed items first (they're the ones to act on), then by name
+    table.sort(itemList, function(a, b)
+        if a.unused ~= b.unused then return a.unused end
+        return a.name < b.name
+    end)
+    itemStats.total, itemStats.unused = #itemList, unused
+    RefreshItems()
+end
+
+local itemScanPending = false
+local function QueueItemScan()
+    if itemScanPending then return end
+    itemScanPending = true
+    C_Timer.After(0.4, function()
+        itemScanPending = false
+        ScanItems()
+        if Refresh then Refresh() end -- updates the broker tooltip numbers
+    end)
 end
 
 ----------------------------------------------------------------------------------------
@@ -675,13 +1182,20 @@ local function UpdateBroker(s)
 end
 
 ----------------------------------------------------------------------------------------
--- Refresh
+-- Refresh (main window)
 ----------------------------------------------------------------------------------------
 Refresh = function()
     if not DB then return end
     local s = GetSummary()
     UpdateBroker(s)
     if not frame:IsShown() then return end
+
+    -- size: the height is fixed while the list is folded
+    if not frame.isSizing then
+        frame:SetWidth(DB.size.w)
+        frame:SetHeight(DB.listOpen and DB.size.h or CLOSED_H)
+    end
+    mainGrip:SetShown(DB.listOpen)
 
     -- XP bar
     if s.atMax then
@@ -715,7 +1229,6 @@ Refresh = function()
     scroll:SetShown(DB.listOpen)
     allOn:SetShown(DB.listOpen)
     allOff:SetShown(DB.listOpen)
-    frame:SetHeight(DB.listOpen and (150 + LIST_H + 12) or 138)
 
     for _, b in ipairs(headerButtons) do
         local label = b.label
@@ -750,11 +1263,11 @@ Refresh = function()
         rows[i].entry = nil
     end
     emptyText:SetShown(#list == 0)
-    content:SetHeight(math.max(#list * ROW_H, LIST_H))
+    content:SetHeight(math.max(#list * ROW_H, scroll:GetHeight()))
 end
 
 ----------------------------------------------------------------------------------------
--- Scanning
+-- Quest log scanning
 ----------------------------------------------------------------------------------------
 local scanAfterCombat = false
 local function ScanQuestLog()
@@ -773,7 +1286,9 @@ local function ScanQuestLog()
                 if not IsOnQuest(id) then DB.quests[id] = nil; DB.excluded[id] = nil end
             end
         end
+        wipe(questUse)
         Refresh()
+        QueueItemScan()
         return
     end
 
@@ -795,6 +1310,10 @@ local function ScanQuestLog()
                 q.index = i
                 DB.quests[e.questID] = q
                 seen[e.questID] = true
+                questUse[e.questID] = {
+                    objectives = ReadObjectives(i, e.questID),
+                    special    = ReadSpecialItem(i),
+                }
             end
         end
     end
@@ -813,11 +1332,16 @@ local function ScanQuestLog()
             if not keep then
                 DB.quests[id] = nil
                 DB.excluded[id] = nil
+                questUse[id] = nil
             end
         end
     end
+    for id in pairs(questUse) do
+        if not DB.quests[id] then questUse[id] = nil end
+    end
 
     Refresh()
+    QueueItemScan()
 end
 
 local scanPending = false
@@ -839,20 +1363,38 @@ local function SafeRegister(ev)
     pcall(events.RegisterEvent, events, ev)
 end
 
+local function CopyDefaults(dst, src)
+    for k, v in pairs(src) do
+        if dst[k] == nil then
+            if type(v) == "table" then
+                dst[k] = {}
+                CopyDefaults(dst[k], v)
+            else
+                dst[k] = v
+            end
+        end
+    end
+end
+
 events:RegisterEvent("ADDON_LOADED")
 events:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 ~= ADDON_NAME then return end
         QuestXPTrackerDB = QuestXPTrackerDB or {}
         DB = QuestXPTrackerDB
-        for k, v in pairs(DEFAULTS) do
-            if DB[k] == nil then DB[k] = (type(v) == "table") and {} or v end
-        end
+        CopyDefaults(DB, DEFAULTS)
         if DB.sortKey == "zone" then DB.sortKey = "title" end -- column removed in 1.1
+        DB.size.w = math.max(DB.size.w, MAIN_MIN_W)
+        DB.size.h = math.max(DB.size.h, MAIN_MIN_H)
+        DB.itemSize.w = math.max(DB.itemSize.w, ITEMS_MIN_W)
+        DB.itemSize.h = math.max(DB.itemSize.h, ITEMS_MIN_H)
         if DB.point then
             frame:ClearAllPoints()
             frame:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
         end
+        frame:SetWidth(DB.size.w)
+        itemsFrame:SetSize(DB.itemSize.w, DB.itemSize.h)
+        itemsFrame:SetShown(DB.itemsShown)
         PlaceMinimapButton()
         minimapBtn:SetShown(not DB.minimap.hide)
         events:UnregisterEvent("ADDON_LOADED")
@@ -864,6 +1406,8 @@ events:SetScript("OnEvent", function(_, event, arg1)
         SafeRegister("PLAYER_LEVEL_UP")
         SafeRegister("PLAYER_XP_UPDATE")
         SafeRegister("PLAYER_REGEN_ENABLED")
+        SafeRegister("BAG_UPDATE_DELAYED")
+        SafeRegister("BAG_UPDATE")
         return
     end
 
@@ -876,9 +1420,12 @@ events:SetScript("OnEvent", function(_, event, arg1)
         PlaceMinimapButton()
         if DB.shown then frame:Show() end
         QueueScan()
+    elseif event == "BAG_UPDATE_DELAYED" or event == "BAG_UPDATE" then
+        QueueItemScan()
     elseif (event == "QUEST_TURNED_IN" or event == "QUEST_REMOVED") and arg1 then
         DB.quests[arg1] = nil
         DB.excluded[arg1] = nil
+        questUse[arg1] = nil
         QueueScan()
     elseif event == "PLAYER_XP_UPDATE" then
         Refresh()
@@ -896,16 +1443,25 @@ SlashCmdList.QUESTXPTRACKER = function(msg)
     msg = (msg or ""):lower():match("^%s*(.-)%s*$")
     if msg == "reset" then
         DB.point = nil
+        DB.size.w, DB.size.h = DEFAULTS.size.w, DEFAULTS.size.h
+        DB.itemSize.w, DB.itemSize.h = DEFAULTS.itemSize.w, DEFAULTS.itemSize.h
         frame:ClearAllPoints()
         frame:SetPoint("CENTER")
         frame:Show()
-        print("|cffffd200Quest XP Tracker:|r window position reset.")
+        Refresh()
+        RefreshItems()
+        print("|cffffd200Quest XP Tracker:|r window position and size reset.")
     elseif msg == "scan" then
         ScanQuestLog()
+        ScanItems()
     elseif msg == "minimap" then
         DB.minimap.hide = not DB.minimap.hide
         minimapBtn:SetShown(not DB.minimap.hide)
         print("|cffffd200Quest XP Tracker:|r minimap button " .. (DB.minimap.hide and "hidden" or "shown") .. ".")
+    elseif msg == "items" then
+        DB.itemsShown = not DB.itemsShown
+        itemsFrame:SetShown(DB.itemsShown)
+        if not frame:IsShown() and DB.itemsShown then frame:Show() end
     else
         ToggleWindow()
         if frame:IsShown() then QueueScan() end
