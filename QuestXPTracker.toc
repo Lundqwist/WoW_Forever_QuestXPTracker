@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Quest XP Tracker
+## Notes: Lists the XP reward and zone of every quest in your quest log and shows how far the active ones take you toward the next level. /qxp
+## Author: Lundqwist
+## Version: 1.0.0
+## SavedVariablesPerCharacter: QuestXPTrackerDB
+
+QuestXPTracker.lua
