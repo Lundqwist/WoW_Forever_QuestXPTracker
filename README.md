@@ -23,3 +23,7 @@ Copy the folder into `World of Warcraft\_forever_\Interface\AddOns\` and name it
 - `/qxp` or `/questxp`: show or hide the window
 - `/qxp reset`: move the window back to the centre
 - `/qxp scan`: rescan the quest log
+
+## License
+
+[MIT](LICENSE) © 2026 Bjarne Lundqwist
